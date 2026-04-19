@@ -87,123 +87,93 @@ class TestCrawl(unittest.TestCase):
 
     def test_get_urls_from_html_absolute(self):
         input_body = [
-            '<a href="https://crawler-test.com/about">About</a>',
-            '<a href="/about">About</a>',
-            '<a href="https://crawler-test.com/contact">Contact</a>',
-            '<a href="https://crawler-test.com/../up">Up</a>',
-            '<a href="https://crawler-test.com#section">Section</a>',
-            '<a href="">Empty</a>',
-            '<a>No link</a>',
-            '<a href="https://crawler-test.com/a">A</a><a href="https://crawler-test.com/b">B</a>',
-            '<a href="https://crawler-test.com/dup">1</a><a href="https://crawler-test.com/dup">2</a>',
-            '<a href="https://crawler-test.com">Home</a>',
-            '<a href="https://crawler-test.com/lib.js">CDN</a>',
-            '<a href="https://crawler-test.com/search?q=test">Search</a>',
-            '<a href="javascript:void(0)">Click</a>',
-            '<a href="mailto:test@example.com">Email</a>',
+            '<a href="https://crawler-test.com/about">About</a>',           # T0
+            '<a href="/about">About</a>',                                    # T1
+            '<a href="https://crawler-test.com/contact">Contact</a>',       # T2
+            '<a href="https://crawler-test.com/../up">Up</a>',              # T3
+            '<a href="https://crawler-test.com#section">Section</a>',       # T4: fragment stripped → root
+            '<a href="">Empty</a>',                                          # T5
+            '<a>No link</a>',                                               # T6
+            '<a href="https://crawler-test.com/a">A</a><a href="https://crawler-test.com/b">B</a>',  # T7
+            '<a href="https://crawler-test.com/dup">1</a><a href="https://crawler-test.com/dup">2</a>',  # T8: dedup
+            '<a href="https://crawler-test.com">Home</a>',                  # T9
+            '<a href="https://crawler-test.com/lib.js">CDN</a>',            # T10
+            '<a href="https://crawler-test.com/search?q=test">Search</a>',  # T11
+            '<a href="javascript:void(0)">Click</a>',                       # T12: dropped
+            '<a href="mailto:test@example.com">Email</a>',                  # T13: dropped
             '''
             <a href="https://crawler-test.com/valid">Valid</a>
             <a href="javascript:void(0)">JS</a>
             <a>No href</a>
-            ''',
-            '<A HREF="https://crawler-test.com/upper">Upper</A>',
-            '<a href="https://crawler-test.com/broken">Broken',
-            '<div><a href="https://crawler-test.com/nested"><span>Text</span></a></div>',
-            '<a href="https://crawler-test.com/page#section">Fragment</a>',
+            ''',                                                             # T14: js dropped
+            '<A HREF="https://crawler-test.com/upper">Upper</A>',           # T15: uppercase handled
+            '<a href="https://crawler-test.com/broken">Broken',             # T16: unclosed tag
+            '<div><a href="https://crawler-test.com/nested"><span>Text</span></a></div>',  # T17
+            '<a href="https://crawler-test.com/page#section">Fragment</a>', # T18: fragment stripped
         ]
         expected = [
-            ["https://crawler-test.com/about"],
-            ["https://crawler-test.com/about"],
-            ["https://crawler-test.com/contact"],
-            ["https://crawler-test.com/../up"],
-            ["https://crawler-test.com#section"],
-            [],
-            [],
-            ["https://crawler-test.com/a", "https://crawler-test.com/b"],
-            ["https://crawler-test.com/dup"],
-            ["https://crawler-test.com"],
-            ["https://crawler-test.com/lib.js"],
-            ["https://crawler-test.com/search?q=test"],
-            ["javascript:void(0)"],
-            ["mailto:test@example.com"],
-            ["https://crawler-test.com/valid", "javascript:void(0)"],
-            ["https://crawler-test.com/upper"],
-            ["https://crawler-test.com/broken"],
-            ["https://crawler-test.com/nested"],
-            ["https://crawler-test.com/page#section"],
+            ["https://crawler-test.com/about"],        # T0
+            ["https://crawler-test.com/about"],        # T1
+            ["https://crawler-test.com/contact"],      # T2
+            ["https://crawler-test.com/../up"],        # T3
+            ["https://crawler-test.com/"],             # T4: fragment stripped, root URL
+            [],                                        # T5
+            [],                                        # T6
+            ["https://crawler-test.com/a", "https://crawler-test.com/b"],  # T7
+            ["https://crawler-test.com/dup"],          # T8
+            ["https://crawler-test.com"],              # T9
+            ["https://crawler-test.com/lib.js"],       # T10
+            ["https://crawler-test.com/search?q=test"],# T11
+            [],                                        # T12: javascript: dropped
+            [],                                        # T13: mailto: dropped
+            ["https://crawler-test.com/valid"],        # T14: js dropped
+            ["https://crawler-test.com/upper"],        # T15
+            ["https://crawler-test.com/broken"],       # T16
+            ["https://crawler-test.com/nested"],       # T17
+            ["https://crawler-test.com/page"],         # T18: fragment stripped
         ]
         base_url = "https://crawler-test.com"
         for idx, test in enumerate(input_body):
             with self.subTest(test=test):
                 actual = get_urls_from_html(test, base_url)
-                self.assertEqual(actual, expected[idx])
+                self.assertEqual(actual, expected[idx], f"\nTest {idx} failed")
 
     def test_get_images_from_html(self):
         input_body = [
-            '<img src="https://crawler-test.com/a.png">',
-
-            '<img src="/about.png">',
-
-            '<img src="about.png">',
-
-            '<img src="https://crawler-test.com/a.png"><img src="https://crawler-test.com/b.png">',
-
-            '<img src="https://crawler-test.com/a.png"><img src="https://crawler-test.com/a.png">',
-
-            '<img src="">',
-
-            '<img>',
-
-            '<IMG SRC="https://crawler-test.com/upper.png">',
-
-            '<img data-src="https://crawler-test.com/lazy.png">',
-
-            '<img srcset="https://crawler-test.com/srcset.png 1x">',
-
-            '<img src="//cdn.crawler-test.com/cdn.png">',
-
-            '<img src="data:image/png;base64,AAAA">',
-
-            '<div><img src="https://crawler-test.com/nested.png"></div>',
-
-            '<img src="https://crawler-test.com/query.png?x=1&y=2">',
-
-            '<img src="https://crawler-test.com/page.png#section">',
-
-            '<img src="   https://crawler-test.com/space.png   ">',
+            '<img src="https://crawler-test.com/a.png">',                   # T0
+            '<img src="/about.png">',                                        # T1: relative → absolute
+            '<img src="about.png">',                                         # T2: no leading slash → resolved
+            '<img src="https://crawler-test.com/a.png"><img src="https://crawler-test.com/b.png">',  # T3
+            '<img src="https://crawler-test.com/a.png"><img src="https://crawler-test.com/a.png">',  # T4: dedup
+            '<img src="">',                                                   # T5
+            '<img>',                                                          # T6
+            '<IMG SRC="https://crawler-test.com/upper.png">',               # T7: uppercase attrs
+            '<img data-src="https://crawler-test.com/lazy.png">',           # T8: data-src ignored
+            '<img srcset="https://crawler-test.com/srcset.png 1x">',        # T9: srcset resolved
+            '<img src="//cdn.crawler-test.com/cdn.png">',                   # T10: protocol-relative
+            '<img src="data:image/png;base64,AAAA">',                       # T11: data URI dropped
+            '<div><img src="https://crawler-test.com/nested.png"></div>',   # T12
+            '<img src="https://crawler-test.com/query.png?x=1&y=2">',      # T13: query string preserved
+            '<img src="https://crawler-test.com/page.png#section">',        # T14: fragment stripped
+            '<img src="   https://crawler-test.com/space.png   ">',         # T15: whitespace stripped
         ]
         expected = [
-            ["https://crawler-test.com/a.png"],
-
-            ["https://crawler-test.com/about.png"],
-
-            [],
-
-            ["https://crawler-test.com/a.png", "https://crawler-test.com/b.png"],
-
-            ["https://crawler-test.com/a.png"],
-
-            [],
-
-            [],
-
-            ["https://crawler-test.com/upper.png"],
-
-            [],
-
-            [],
-
-            ["https://cdn.crawler-test.com/cdn.png"],
-
-            [],
-
-            ["https://crawler-test.com/nested.png"],
-
-            ["https://crawler-test.com/query.png?x=1&y=2"],
-
-            ["https://crawler-test.com/page.png#section"],
-
-            ["https://crawler-test.com/space.png"],
+            ["https://crawler-test.com/a.png"],        # T0
+            ["https://crawler-test.com/about.png"],    # T1
+            ["https://crawler-test.com/about.png"],    # T2: urljoin resolves relative paths
+            ["https://crawler-test.com/a.png", "https://crawler-test.com/b.png"],  # T3
+            ["https://crawler-test.com/a.png"],        # T4
+            [],                                        # T5
+            [],                                        # T6
+            ["https://crawler-test.com/upper.png"],    # T7
+            [],                                        # T8: data-src not read
+            ["https://crawler-test.com/srcset.png"],   # T9
+            ["https://cdn.crawler-test.com/cdn.png"],  # T10
+            [],                                        # T11
+            ["https://crawler-test.com/nested.png"],   # T12
+            ["https://crawler-test.com/query.png?x=1&y=2"],  # T13
+            ["https://crawler-test.com/page.png"],     # T14: fragment stripped
+            ["https://crawler-test.com/space.png"],    # T15
         ]
 
         base_url = "https://crawler-test.com"
