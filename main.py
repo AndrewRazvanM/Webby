@@ -1,5 +1,5 @@
 import sys
-from crawl import crawl_page
+from crawl import crawl_website
 
 def main():
     command_line_arg = sys.argv
@@ -15,8 +15,11 @@ def main():
     url = command_line_arg[1]
 
     print(f"starting crawl of: {command_line_arg[1]}")
-    page_data = crawl_page(url)
-    print(page_data)
+    page_data = crawl_website(url)
+    print(f"Crawled {len(page_data)} URLs on the website")
+    for page in page_data:
+        print(f"URL: {page}")
+        print(f"Outgoing URLs: {page_data[page]["outgoing_links"]}")
 
 if __name__ == "__main__":
     main()

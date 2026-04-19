@@ -2,13 +2,14 @@ from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from lxml import html
 import requests
-from time import sleep
+from time import sleep, monotonic
 from sys import exit as sys_exit
 
 PARSING_ENGINE = 'lxml'
 VERSION = 0.1
 RECONNECT_ATTEMPS = 3
 WAIT_BEFORE_RECONNECT = 0.5
+
 
 def get_html(url: str) -> tuple[bytes, str]:
 
@@ -209,7 +210,7 @@ def parse_single_image_url(url: str, base_url:str) -> str | None:
         
     return img
 
-def extract_page_data(html: str | bytes, base_url:str, encoding: str, keep_fragments = False):
+def extract_page_data(html: str | bytes, base_url:str, encoding: str, keep_fragments = False) -> dict[str, str | list[str]]:
 
     page_data = {
         "url": base_url,
@@ -302,7 +303,8 @@ def crawl_website(base_url: str):
     """
     Crawls a whole website and all the links on it. Branches to all links that point to the same domain.
     """
-
+    #used for limiting the requests/seconds. First request goes through immediately
+    prev_request_time = 0.0
     current_url =  base_url
     page_data = {}
 
@@ -313,9 +315,14 @@ def crawl_website(base_url: str):
     crawl_queue.push(current_url, base_url_norm)
 
     while crawl_queue.len > 0:
+        #throtthle the requests per second
+        request_time = monotonic()
+        if (prev_request_time + WAIT_BEFORE_RECONNECT) < request_time:
+            prev_request_time = request_time
+            sleep(WAIT_BEFORE_RECONNECT)
+
         #get next item from queue
         current_url = crawl_queue.pop()   
-            
         #get html page and normalize the url
         print(f"Retrieving Page...")
         html_byte, encoding = get_html(current_url)
@@ -331,12 +338,10 @@ def crawl_website(base_url: str):
 
         #crawl through all links on that page
         for out_url in page_data[current_url_norm]["outgoing_links"]:
-            print(f"Checking {out_url}")
             next_parsed_url = urlparse(out_url)
             next_norm_url = normalize_urls(out_url)
 
             #check that's it's on the same domain
-            print(f"New domain {next_parsed_url.netloc} compared to base domain {parsed_base_url.netloc}")
             if next_parsed_url.netloc != parsed_base_url.netloc:
                 continue
             
@@ -347,5 +352,30 @@ def crawl_website(base_url: str):
 
         if crawl_queue.len == 1:
             print(f"Finished scanning the domain {parsed_base_url.netloc}")
-        
 
+    return page_data
+
+import asyncio
+import time
+
+async def say_after(delay, what):
+    await asyncio.sleep(delay)
+    print(what)
+
+async def main():
+    task1 = asyncio.create_task(
+        say_after(1, 'hello'))
+
+    task2 = asyncio.create_task(
+        say_after(2, 'world'))
+
+    print(f"started at {time.strftime('%X')}")
+
+    # Wait until both tasks are completed (should take
+    # around 2 seconds.)
+    await task1
+    await task2
+
+    print(f"finished at {time.strftime('%X')}")
+
+asyncio.run(main())
