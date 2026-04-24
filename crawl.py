@@ -1,53 +1,161 @@
 from urllib.parse import urlparse, urljoin
 from bs4 import BeautifulSoup
 from lxml import html
-import requests
 from time import sleep, monotonic
 from sys import exit as sys_exit
+import asyncio
+import aiohttp
 
 PARSING_ENGINE = 'lxml'
 VERSION = 0.1
-RECONNECT_ATTEMPS = 3
+RECONNECT_ATTEMPS = 2
 WAIT_BEFORE_RECONNECT = 0.5
+NR_BATCH_CONNECTIONS = 10
 
 
-def get_html(url: str) -> tuple[bytes, str]:
-
-    for nr in range(RECONNECT_ATTEMPS):
-        try:
-            r = requests.get(url, headers={"User-Agent": f"WebbyCrawler /{VERSION}"})
-            break
-        except requests.exceptions.RequestException as e:
-            if e.response is not None:
-                if nr < RECONNECT_ATTEMPS - 1:
-                    print(f"HTTP {e.response.status_code}: {e.response.reason}\nAttempt {nr}. Trying again...")
-                else:
-                    print(f"HTTP {e.response.status_code}: {e.response.reason}\nAttempt {nr}. Last try...")
-            elif nr < RECONNECT_ATTEMPS - 1:
-                print(f"Error: {e}\nAttempt {nr}. Trying again...")
-            else:
-                print(f"Error: {e}\nAttempt {nr}. Last Try...")
-                    
-            sleep(WAIT_BEFORE_RECONNECT)
-
-        if nr == RECONNECT_ATTEMPS - 1:
-            sys_exit(1)
-
-    #makes sure page has proper content type
-    try:
-        if "text/html" not in r.headers["Content-Type"]:  # type: ignore
-            print(f"Wrong Content-Type header : {r.headers["Content-Type"]}. Cannot scrape")  # type: ignore
-            sys_exit(1)
-    except KeyError:
-        print(f"No Content-Type header on page. Cannot scrape")
-        sys_exit(1)
-
-    if r.encoding is None: # type: ignore
-        encoding = "N/A"
-    else:
-        encoding = r.encoding # type: ignore
+class Queue:
+    __slots__ = (
+        "items",
+        "seen",
+        "len",
+        )
     
-    return r._content, encoding # type: ignore
+    def __init__ (self):
+        self.items = []
+        self.len = 0
+        self.seen = set()
+
+    def push (self, website:str, website_norm_url: str):
+        self.items.append(website)
+        self.seen.add(website_norm_url)
+        self.len += 1
+
+    def pop (self) -> str :
+        if self. len > 0:
+            self.len -= 1
+            return self.items.pop(0)
+        else:
+            return ""
+        
+    def peek(self) -> str:
+        if self.len > 0:
+            return self.items[self.len - 1]
+        else:
+            return ""
+        
+    def size(self) -> int:
+        return self.len
+    
+    def was_in_queue(self, website:str) -> bool:
+        if website in self.seen:
+            return True
+        else:
+            return False
+        
+class AsyncCrawler:
+
+    def __init__(self, base_url: str, max_requests = 4, max_pages = -1):
+        self.base_url = base_url
+        self.base_domain = urlparse(base_url).netloc
+        self.page_data = {}
+        self.lock = asyncio.Lock()
+        self.crawl_queue = Queue()
+        self.max_pages = max_pages
+        self.semaphore = asyncio.Semaphore(max_requests)
+
+    async def __aenter__(self):
+        self.session = aiohttp.ClientSession(headers={"User-Agent": f"WebbyCrawler/{VERSION}"})
+        return self
+    
+    async def __aexit__(self, exc_type, exc_val, exc_tb):
+        await self.session.close()
+
+    async def add_page_visit(self, normalized_url: str) -> bool:
+        lock = self.lock
+
+        async with lock:
+            if normalized_url in self.page_data:
+                return False
+            else:
+                self.page_data[normalized_url] = None
+                return True
+            
+    async def get_html(self, url: str) -> str | None:
+        
+        for nr in range(RECONNECT_ATTEMPS):
+            try:
+                async with self.session.get(url) as resp:
+                    resp.raise_for_status()
+                    #makes sure page has proper content type
+                    if not resp.content_type.startswith("text/html"): 
+                        print(f"Wrong Content-Type header : {resp.content_type}. Cannot scrape {url}")
+                        return None
+                            
+                    text = await resp.text()
+                            
+                    return text
+                
+            except aiohttp.ClientResponseError as e:
+                print(f"HTTP Error {e.status}: {e.message}")
+                await asyncio.sleep(WAIT_BEFORE_RECONNECT)
+
+            except aiohttp.ClientConnectorError as e:
+                print(f"DNS error: {e}")
+                await asyncio.sleep(WAIT_BEFORE_RECONNECT)
+
+            except aiohttp.ClientError as e:
+                print(f"Error {e}")
+                await asyncio.sleep(WAIT_BEFORE_RECONNECT)
+            
+        return None
+    
+    async def crawl_site(self, new_url: str):
+        max_pages = self.max_pages
+        parsed_base_url = urlparse(new_url)
+        base_url_norm = normalize_urls(new_url)
+        
+        crawl_queue = self.crawl_queue
+        crawl_queue.push(new_url, base_url_norm)
+
+        while crawl_queue.len > 0:
+            # batch requests
+            batch = []
+            for _ in range(NR_BATCH_CONNECTIONS):
+                url = crawl_queue.pop()
+                if url == "":
+                    continue
+                normalized_url = normalize_urls(url)
+                if await self.add_page_visit(normalized_url):
+                    print(f"Scanning {url}")
+                    batch.append(url)
+
+            # fire all concurrently
+            tasks = [asyncio.create_task(self.get_html(url)) for url in batch]
+            results = await asyncio.gather(*tasks)  # all run at same time
+
+            # process results, queue new urls
+            for url, html_raw in zip(batch, results):
+                if html_raw is None:
+                    continue
+                norm = normalize_urls(url)
+                parsed = extract_page_data(html_raw, url)
+            
+                async with self.lock:
+                    print(f"URL {url} was parsed and stored")
+                    self.page_data[norm] = parsed
+
+                if max_pages >= 0 and len(self.page_data) > max_pages:
+                    print("Maximum number of URLs scanned. Stopping...")
+                    return self.page_data
+
+                for out_url in parsed["outgoing_links"]:
+                    if urlparse(out_url).netloc == parsed_base_url.netloc:
+                        next_norm = normalize_urls(out_url)
+                        if not crawl_queue.was_in_queue(next_norm):
+                            crawl_queue.push(out_url, next_norm)
+    
+    async def crawl(self):
+        pass
 
 def convert_html_to_object(html):
     pass
@@ -57,13 +165,12 @@ def normalize_urls(url: str) -> str:
 
     return url_object.netloc + url_object.path.rstrip("/") # type: ignore
 
-def get_heading_from_html(html:str | bytes, encoding = "N/A") -> str:
+def get_heading_from_html(html:str) -> str:
     """Returns the heading from an html. If no heading is present, it wil lreturn an empty string."""
     try:
-        if encoding == "N/A":
-            page = BeautifulSoup(html, PARSING_ENGINE)
-        else:
-            page = BeautifulSoup(html, PARSING_ENGINE, from_encoding=f"{encoding}")
+
+        page = BeautifulSoup(html, PARSING_ENGINE)
+
     except Exception as e:
         return f"Parser error: {e}"
 
@@ -77,13 +184,12 @@ def get_heading_from_html(html:str | bytes, encoding = "N/A") -> str:
     
     return ""
 
-def get_first_paragraph_from_html(html: str | bytes, encoding = "N/A") -> str:
+def get_first_paragraph_from_html(html: str) -> str:
     """Returns the firs paragraph from an html. If no paragraph is present, it will return an empty string."""
     try:
-        if encoding == "N/A":
-            page = BeautifulSoup(html, PARSING_ENGINE)
-        else:
-            page = BeautifulSoup(html, PARSING_ENGINE, from_encoding=f"{encoding}")
+
+        page = BeautifulSoup(html, PARSING_ENGINE)
+
     except Exception as e:
         return f"Parser error: {e}"
 
@@ -102,16 +208,15 @@ def get_first_paragraph_from_html(html: str | bytes, encoding = "N/A") -> str:
     else:
         return first_paragraph
     
-def get_urls_from_html(html: str | bytes, base_url: str, keep_fragments = False, encoding = "N/A") -> list[str]:
+def get_urls_from_html(html: str, base_url: str, keep_fragments = False) -> list[str]:
     """Return all the urls from an html. 
         If no url is present, it wil lreturn an empty list.
         If there's an error while parsing, it will output a list of len 1 with the error message.
         If keep_fragments is True, then fragments will be preserved. Otherwise, they are dropped"""
     try:
-        if encoding == "N/A":
-            page = BeautifulSoup(html, PARSING_ENGINE)
-        else:
-            page = BeautifulSoup(html, PARSING_ENGINE, from_encoding=f"{encoding}")
+        
+        page = BeautifulSoup(html, PARSING_ENGINE)
+
     except Exception as e:
         return [f"Parser error: {e}"]
     
@@ -143,15 +248,14 @@ def get_urls_from_html(html: str | bytes, base_url: str, keep_fragments = False,
     
     return urls_list
 
-def get_images_from_html(html: str | bytes, base_url: str, encoding = "N/A") -> list[str]:
+def get_images_from_html(html: str, base_url: str) -> list[str]:
     """Return all the images urls from an html. Data attributes are ignored.
         If no image url is present, it wil lreturn an empty list.
         If there's an error while parsing, it will output a list of len 1 with the error message."""
     try:
-        if encoding == "N/A":
+            
             page = BeautifulSoup(html, PARSING_ENGINE)
-        else:
-            page = BeautifulSoup(html, PARSING_ENGINE, from_encoding=f"{encoding}")
+
     except Exception as e:
         return [f"Parser error: {e}"]
     
@@ -210,172 +314,15 @@ def parse_single_image_url(url: str, base_url:str) -> str | None:
         
     return img
 
-def extract_page_data(html: str | bytes, base_url:str, encoding: str, keep_fragments = False) -> dict[str, str | list[str]]:
+def extract_page_data(html: str, base_url:str, keep_fragments = False) -> dict[str, str | list[str]]:
 
     page_data = {
         "url": base_url,
-        "heading": get_heading_from_html(html, encoding),
-        "first_paragraph": get_first_paragraph_from_html(html, encoding),
-        "outgoing_links": get_urls_from_html(html, base_url, keep_fragments, encoding),
-        "image_urls": get_images_from_html(html, base_url, encoding),
+        "heading": get_heading_from_html(html),
+        "first_paragraph": get_first_paragraph_from_html(html),
+        "outgoing_links": get_urls_from_html(html, base_url, keep_fragments),
+        "image_urls": get_images_from_html(html, base_url),
     }
 
     return page_data
 
-def crawl_page(base_url: str):
-    """
-    Crawls a single page and all the links on it (depth = 1). Does not branch to other pages.
-    """
-    parsed_base_url = urlparse(base_url)
-    page_data = {}
-
-    #crawl through base_url page
-    current_url_norm = normalize_urls(base_url)
-    parsed_current_url = urlparse(base_url)
-
-    print(f"Retrieving Page...")
-    byte_html, encoding = get_html(base_url)
-    print("Page succesfully retrieved. Getting page data...")
-    page_data[current_url_norm] = extract_page_data(byte_html, base_url, encoding)
-    print(f"Got page data. Moving to next page...")
-
-    #crawl through all links on that page
-    for url in page_data[current_url_norm]["outgoing_links"]:
-        current_url_norm = normalize_urls(url)
-        parsed_current_url = urlparse(url)
-
-        if current_url_norm in page_data:
-            continue
-            
-        if parsed_current_url.netloc != parsed_base_url.netloc:
-            continue
-
-        print(f"Crawling next page: {url}")
-        print(f"Retrieving Page...")
-        byte_html, encoding = get_html(url)
-
-        print("Page succesfully retrieved. Getting page data...")
-        page_data[current_url_norm] = extract_page_data(byte_html, base_url, encoding)
-        print(f"Got page data. Moving to next page...")
-
-    return page_data
-
-class Queue:
-    __slots__ = (
-        "items",
-        "seen",
-        "len",
-        )
-    
-    def __init__ (self):
-        self.items = []
-        self.len = 0
-        self.seen = set()
-
-    def push (self, website: str, website_norm_url: str):
-        self.items.append(website)
-        self.seen.add(website_norm_url)
-        self.len += 1
-
-    def pop (self) -> str:
-        if self. len > 0:
-            self.len -= 1
-            return self.items.pop(0)
-        else:
-            return ""
-        
-    def peek(self):
-        if self.len > 0:
-            return self.items[self.len - 1]
-        else:
-            return None
-        
-    def size(self):
-        return self.len
-    
-    def was_in_queue(self, website:str) -> bool:
-        if website in self.seen:
-            return True
-        else:
-            return False
-
-def crawl_website(base_url: str):
-    """
-    Crawls a whole website and all the links on it. Branches to all links that point to the same domain.
-    """
-    #used for limiting the requests/seconds. First request goes through immediately
-    prev_request_time = 0.0
-    current_url =  base_url
-    page_data = {}
-
-    parsed_base_url = urlparse(base_url)
-    base_url_norm = normalize_urls(base_url)
-
-    crawl_queue = Queue()
-    crawl_queue.push(current_url, base_url_norm)
-
-    while crawl_queue.len > 0:
-        #throtthle the requests per second
-        request_time = monotonic()
-        if (prev_request_time + WAIT_BEFORE_RECONNECT) < request_time:
-            prev_request_time = request_time
-            sleep(WAIT_BEFORE_RECONNECT)
-
-        #get next item from queue
-        current_url = crawl_queue.pop()   
-        #get html page and normalize the url
-        print(f"Retrieving Page...")
-        html_byte, encoding = get_html(current_url)
-        current_url_norm = normalize_urls(current_url)
-
-        #extract data from page and store it if it's not already saved
-        print("Page succesfully retrieved. Getting page data...")
-        data = extract_page_data(html_byte, current_url, encoding)
-        if current_url_norm not in page_data:
-            page_data[current_url_norm]  = data
-        
-        print(f"Got page data. Analyzing outgoing links...")
-
-        #crawl through all links on that page
-        for out_url in page_data[current_url_norm]["outgoing_links"]:
-            next_parsed_url = urlparse(out_url)
-            next_norm_url = normalize_urls(out_url)
-
-            #check that's it's on the same domain
-            if next_parsed_url.netloc != parsed_base_url.netloc:
-                continue
-            
-            #check to see if it's already in the queue
-            if out_url not in crawl_queue.items and not crawl_queue.was_in_queue(next_norm_url):
-                print(f"Added {out_url} to the crawl queue")
-                crawl_queue.push(out_url, next_norm_url)
-
-        if crawl_queue.len == 1:
-            print(f"Finished scanning the domain {parsed_base_url.netloc}")
-
-    return page_data
-
-import asyncio
-import time
-
-async def say_after(delay, what):
-    await asyncio.sleep(delay)
-    print(what)
-
-async def main():
-    task1 = asyncio.create_task(
-        say_after(1, 'hello'))
-
-    task2 = asyncio.create_task(
-        say_after(2, 'world'))
-
-    print(f"started at {time.strftime('%X')}")
-
-    # Wait until both tasks are completed (should take
-    # around 2 seconds.)
-    await task1
-    await task2
-
-    print(f"finished at {time.strftime('%X')}")
-
-asyncio.run(main())
